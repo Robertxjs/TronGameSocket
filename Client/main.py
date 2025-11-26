@@ -3,25 +3,34 @@ import socket
 import sys
 import time
 
-# --- CONFIGURARE ---
-SERVER_IP = '127.0.0.1' # Schimba cu IP-ul tau de LAN daca joci cu un coleg
+SERVER_IP = '127.0.0.1'
 SERVER_PORT = 54000
 BUFFER_SIZE = 1024
 
 WIDTH, HEIGHT = 800, 600
 PLAYER_SIZE = 10
 
-# Culori Neon
-BLACK = (10, 10, 20)      # Fundal usor albastrui
+BLACK = (10, 10, 20)
 NEON_CYAN = (0, 255, 255) # P1
 NEON_PINK = (255, 20, 147)# P2
 WHITE = (255, 255, 255)
-RED = (255, 0, 0)
 
 def draw_text_center(screen, text, color, y_offset=0):
-    font = pygame.font.SysFont("consolas", 40, bold=True)
+    try: font = pygame.font.SysFont("consolas", 40, bold=True)
+    except: font = pygame.font.SysFont(None, 40)
     render = font.render(text, True, color)
     rect = render.get_rect(center=(WIDTH//2, HEIGHT//2 + y_offset))
+    screen.blit(render, rect)
+
+def draw_score(screen, s1, s2):
+    # Desenam o bara sus pentru scor
+    pygame.draw.rect(screen, BLACK, (0, 0, WIDTH, 40))
+    try: font = pygame.font.SysFont("consolas", 30, bold=True)
+    except: font = pygame.font.SysFont(None, 30)
+
+    text = f"CYAN: {s1}   vs   PINK: {s2}"
+    render = font.render(text, True, WHITE)
+    rect = render.get_rect(center=(WIDTH//2, 20))
     screen.blit(render, rect)
 
 def start_game():
@@ -29,7 +38,6 @@ def start_game():
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption("Tron Multiplayer")
 
-    # Init Socket
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect((SERVER_IP, SERVER_PORT))
@@ -38,11 +46,12 @@ def start_game():
         print(f"Eroare conectare: {e}")
         return
 
-    # Umplem ecranul cu negru la inceput
     screen.fill(BLACK)
-
     running = True
     game_over_state = False
+
+    # Variabile scor
+    score1, score2 = 0, 0
 
     while running:
         # 1. INPUT
@@ -56,29 +65,29 @@ def start_game():
                 if event.key == pygame.K_s: cmd = "S"
                 if event.key == pygame.K_a: cmd = "A"
                 if event.key == pygame.K_d: cmd = "D"
-                if event.key == pygame.K_r: cmd = "R" # Restart
+                if event.key == pygame.K_r: cmd = "R"
 
                 if cmd:
-                    try:
-                        sock.sendall(cmd.encode())
-                    except:
-                        pass
+                    try: sock.sendall(cmd.encode())
+                    except: pass
 
         # 2. NETWORK UPDATE
         try:
             data = sock.recv(BUFFER_SIZE)
             if data:
-                # Format: "p1x,p1y,p2x,p2y,STATUS"
-                msg = data.decode().split(',')
-                if len(msg) >= 5:
+                msg_str = data.decode()
+                msg = msg_str.split(',')
+
+                if len(msg) >= 7: # Acum asteptam 7 valori
                     p1x, p1y = int(msg[0]), int(msg[1])
                     p2x, p2y = int(msg[2]), int(msg[3])
                     status = msg[4]
+                    score1 = int(msg[5]) # Citim scorul
+                    score2 = int(msg[6])
 
-                    # Logic: Daca status e RUNNING, desenam patratele
+                    # Logic
                     if status == "RUNNING":
                         if game_over_state:
-                            # Daca tocmai am iesit din game over (Restart), stergem ecranul
                             screen.fill(BLACK)
                             game_over_state = False
 
@@ -87,13 +96,11 @@ def start_game():
 
                     elif "WIN" in status or "DRAW" in status:
                         game_over_state = True
-                        if status == "P1_WINS":
-                            draw_text_center(screen, "PLAYER 1 WINS!", NEON_CYAN)
-                        elif status == "P2_WINS":
-                            draw_text_center(screen, "PLAYER 2 WINS!", NEON_PINK)
-                        elif status == "DRAW":
-                            draw_text_center(screen, "DRAW!", WHITE)
+                        if status == "P1_WINS": txt = "PLAYER 1 WINS!"
+                        elif status == "P2_WINS": txt = "PLAYER 2 WINS!"
+                        else: txt = "DRAW!"
 
+                        draw_text_center(screen, txt, WHITE, 0)
                         draw_text_center(screen, "Press 'R' to Restart", WHITE, 50)
 
                     elif status == "WAITING":
@@ -102,11 +109,12 @@ def start_game():
         except BlockingIOError:
             pass
         except Exception as e:
-            print(f"Server closed: {e}")
-            running = False
+            print(f"Network warning: {e}")
+
+        # 3. DESENARE SCOR
+        draw_score(screen, score1, score2)
 
         pygame.display.flip()
-        # Nu limitam FPS cu clock.tick prea drastic pentru ca socket-ul dicteaza ritmul
         time.sleep(0.01)
 
     sock.close()
