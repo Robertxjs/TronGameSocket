@@ -1,0 +1,3 @@
+/mnt/c/Users/Robert/CLionProjects/TronGameSocket/Server/cmake-build-debug/CMakeFiles/gameserver.dir
+/mnt/c/Users/Robert/CLionProjects/TronGameSocket/Server/cmake-build-debug/CMakeFiles/edit_cache.dir
+/mnt/c/Users/Robert/CLionProjects/TronGameSocket/Server/cmake-build-debug/CMakeFiles/rebuild_cache.dir

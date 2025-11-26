@@ -1,137 +1,116 @@
 import pygame
 import socket
 import sys
-import threading
+import time
 
-SERVER_IP = '127.0.0.1'
-TCP_PORT = 54000
-UDP_PORT = 54001
+# --- CONFIGURARE ---
+SERVER_IP = '127.0.0.1' # Schimba cu IP-ul tau de LAN daca joci cu un coleg
+SERVER_PORT = 54000
 BUFFER_SIZE = 1024
 
 WIDTH, HEIGHT = 800, 600
-PLAYER_SIZE = 20
-BLACK = (0, 0, 0)
-GRID_COLOR = (20, 20, 20)
-P1_COLOR = (0, 255, 255)
-P2_COLOR = (255, 0, 0)
+PLAYER_SIZE = 10
+
+# Culori Neon
+BLACK = (10, 10, 20)      # Fundal usor albastrui
+NEON_CYAN = (0, 255, 255) # P1
+NEON_PINK = (255, 20, 147)# P2
 WHITE = (255, 255, 255)
+RED = (255, 0, 0)
 
-# Variabila protejata de un lock simplu (deși GIL ajuta in Python, e bine sa fim siguri)
-current_score = "0 - 0"
+def draw_text_center(screen, text, color, y_offset=0):
+    font = pygame.font.SysFont("consolas", 40, bold=True)
+    render = font.render(text, True, color)
+    rect = render.get_rect(center=(WIDTH//2, HEIGHT//2 + y_offset))
+    screen.blit(render, rect)
 
-def udp_listener():
-    global current_score
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # Timeout mic pentru a nu bloca la iesire
-        sock.settimeout(2.0)
-
-        # Abonare
-        msg = "SUBSCRIBE".encode('utf-8')
-        sock.sendto(msg, (SERVER_IP, UDP_PORT))
-        print("[Client UDP] Abonat la scor.")
-
-        while True:
-            try:
-                data, _ = sock.recvfrom(BUFFER_SIZE)
-                text = data.decode('utf-8')
-                if text.startswith("SCORE:"):
-                    # Format: "SCORE:3 - 1"
-                    # Luam tot ce e dupa "SCORE:"
-                    current_score = text[6:]
-            except socket.timeout:
-                continue
-            except Exception as e:
-                print(f"[UDP Error] {e}")
-                break
-    except Exception as e:
-        print(f"[UDP Init Error] {e}")
-
-def draw_grid(screen):
-    for x in range(0, WIDTH, 40):
-        pygame.draw.line(screen, GRID_COLOR, (x, 0), (x, HEIGHT))
-    for y in range(0, HEIGHT, 40):
-        pygame.draw.line(screen, GRID_COLOR, (0, y), (WIDTH, y))
-
-def main():
-    global current_score
+def start_game():
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption("Tron Multiplayer")
-    clock = pygame.time.Clock()
-    font = pygame.font.SysFont("Arial", 40, bold=True)
 
+    # Init Socket
     try:
-        tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        tcp_sock.connect((SERVER_IP, TCP_PORT))
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((SERVER_IP, SERVER_PORT))
+        sock.setblocking(False)
     except Exception as e:
-        print(f"Server TCP Offline: {e}")
+        print(f"Eroare conectare: {e}")
         return
 
-    t_udp = threading.Thread(target=udp_listener, daemon=True)
-    t_udp.start()
-
-    trail_p1 = []
-    trail_p2 = []
-    p1_x, p1_y = 100, 300
-    p2_x, p2_y = 600, 300
+    # Umplem ecranul cu negru la inceput
+    screen.fill(BLACK)
 
     running = True
+    game_over_state = False
+
     while running:
-        cmd = "N"
+        # 1. INPUT
         for event in pygame.event.get():
-            if event.type == pygame.QUIT: running = False
+            if event.type == pygame.QUIT:
+                running = False
+
             if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_w or event.key == pygame.K_UP: cmd = "S"
-                if event.key == pygame.K_s or event.key == pygame.K_DOWN: cmd = "J"
-                if event.key == pygame.K_a or event.key == pygame.K_LEFT: cmd = "A"
-                if event.key == pygame.K_d or event.key == pygame.K_RIGHT: cmd = "D"
+                cmd = None
+                if event.key == pygame.K_w: cmd = "W"
+                if event.key == pygame.K_s: cmd = "S"
+                if event.key == pygame.K_a: cmd = "A"
+                if event.key == pygame.K_d: cmd = "D"
+                if event.key == pygame.K_r: cmd = "R" # Restart
 
+                if cmd:
+                    try:
+                        sock.sendall(cmd.encode())
+                    except:
+                        pass
+
+        # 2. NETWORK UPDATE
         try:
-            tcp_sock.sendall(cmd.encode('utf-8'))
-            data = tcp_sock.recv(BUFFER_SIZE)
+            data = sock.recv(BUFFER_SIZE)
             if data:
-                parts = data.decode('utf-8').split(',')
-                if len(parts) >= 5:
-                    nx1, ny1 = int(parts[0]), int(parts[1])
-                    nx2, ny2 = int(parts[2]), int(parts[3])
-                    reset_flag = int(parts[4])
+                # Format: "p1x,p1y,p2x,p2y,STATUS"
+                msg = data.decode().split(',')
+                if len(msg) >= 5:
+                    p1x, p1y = int(msg[0]), int(msg[1])
+                    p2x, p2y = int(msg[2]), int(msg[3])
+                    status = msg[4]
 
-                    if reset_flag == 1:
-                        trail_p1.clear()
-                        trail_p2.clear()
+                    # Logic: Daca status e RUNNING, desenam patratele
+                    if status == "RUNNING":
+                        if game_over_state:
+                            # Daca tocmai am iesit din game over (Restart), stergem ecranul
+                            screen.fill(BLACK)
+                            game_over_state = False
 
-                    if nx1 != p1_x or ny1 != p1_y:
-                        trail_p1.append((nx1 + PLAYER_SIZE//2, ny1 + PLAYER_SIZE//2))
-                    if nx2 != p2_x or ny2 != p2_y:
-                        trail_p2.append((nx2 + PLAYER_SIZE//2, ny2 + PLAYER_SIZE//2))
+                        pygame.draw.rect(screen, NEON_CYAN, (p1x, p1y, PLAYER_SIZE, PLAYER_SIZE))
+                        pygame.draw.rect(screen, NEON_PINK, (p2x, p2y, PLAYER_SIZE, PLAYER_SIZE))
 
-                    p1_x, p1_y = nx1, ny1
-                    p2_x, p2_y = nx2, ny2
-            else:
-                break
-        except:
-            break
+                    elif "WIN" in status or "DRAW" in status:
+                        game_over_state = True
+                        if status == "P1_WINS":
+                            draw_text_center(screen, "PLAYER 1 WINS!", NEON_CYAN)
+                        elif status == "P2_WINS":
+                            draw_text_center(screen, "PLAYER 2 WINS!", NEON_PINK)
+                        elif status == "DRAW":
+                            draw_text_center(screen, "DRAW!", WHITE)
 
-        screen.fill(BLACK)
-        draw_grid(screen)
+                        draw_text_center(screen, "Press 'R' to Restart", WHITE, 50)
 
-        if len(trail_p1) > 1: pygame.draw.lines(screen, P1_COLOR, False, trail_p1, 3)
-        if len(trail_p2) > 1: pygame.draw.lines(screen, P2_COLOR, False, trail_p2, 3)
+                    elif status == "WAITING":
+                        draw_text_center(screen, "Waiting for Player 2...", WHITE)
 
-        pygame.draw.rect(screen, P1_COLOR, (p1_x, p1_y, PLAYER_SIZE, PLAYER_SIZE))
-        pygame.draw.rect(screen, P2_COLOR, (p2_x, p2_y, PLAYER_SIZE, PLAYER_SIZE))
-
-        # Afisare SCOR
-        txt = font.render(f"SCORE: {current_score}", True, WHITE)
-        screen.blit(txt, (WIDTH // 2 - 100, 10))
+        except BlockingIOError:
+            pass
+        except Exception as e:
+            print(f"Server closed: {e}")
+            running = False
 
         pygame.display.flip()
-        clock.tick(60)
+        # Nu limitam FPS cu clock.tick prea drastic pentru ca socket-ul dicteaza ritmul
+        time.sleep(0.01)
 
-    tcp_sock.close()
+    sock.close()
     pygame.quit()
-    sys.exit()
 
 if __name__ == "__main__":
-    main()
+    start_game()

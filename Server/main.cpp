@@ -1,218 +1,213 @@
 #include <iostream>
 #include <thread>
 #include <vector>
-#include <string>
 #include <cstring>
 #include <netinet/in.h>
 #include <unistd.h>
 #include <sys/socket.h>
-#include <arpa/inet.h>
 #include <mutex>
 #include <chrono>
 
-// --- CONFIGURARE ---
-#define TCP_PORT 54000
-#define UDP_PORT 54001
+#define PORT 54000
 #define BUFFER_SIZE 1024
+#define WIDTH 800
+#define HEIGHT 600
+#define PLAYER_SIZE 10 // Dimensiunea motocicletei
 
-const int WIDTH = 800;
-const int HEIGHT = 600;
-const int SPEED = 5;
-const int PLAYER_SIZE = 20;
+// --- STAREA JOCULUI ---
+struct Player {
+    int x, y;
+    int dir_x, dir_y; // Directia curenta (-1, 0, 1)
+    bool active;
+    bool alive;
+};
 
-bool game_map[WIDTH][HEIGHT]; 
+// Harta logica pentru coliziuni (0 = liber, 1 = ocupat)
+// Folosim o rezolutie simplificata (la nivel de pixel ar fi prea mare matricea)
+bool game_map[WIDTH][HEIGHT];
 
-enum Direction { STOP = 0, UP, DOWN, LEFT, RIGHT };
-
-// --- STARE JOC ---
-int p1_x = 100, p1_y = 300; Direction dir_p1 = RIGHT;
-int p2_x = 600, p2_y = 300; Direction dir_p2 = LEFT;
-
-int score_p1 = 0;
-int score_p2 = 0;
-bool game_reset_flag = false;
+Player p1 = {100, 300, 1, 0, false, true}; // P1 pleaca spre dreapta
+Player p2 = {700, 300, -1, 0, false, true}; // P2 pleaca spre stanga
+int speed = 10;
+bool game_running = false;
+std::string status_message = "WAITING"; // WAITING, RUNNING, P1_WIN, P2_WIN
 
 std::mutex game_mutex;
-std::vector<struct sockaddr_in> udp_clients;
 
-// --- FUNCTII ---
-
-// Trimite scorul prin UDP
-void broadcast_score() {
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    std::string msg = "SCORE:" + std::to_string(score_p1) + " - " + std::to_string(score_p2);
-    
-    // Trimitem la toti clientii abonati
-    for (const auto& client : udp_clients) {
-        sendto(sock, msg.c_str(), msg.size(), 0, (struct sockaddr*)&client, sizeof(client));
-    }
-    close(sock);
-}
-
-void reset_game_state() {
-    p1_x = 100; p1_y = 300; dir_p1 = RIGHT;
-    p2_x = 600; p2_y = 300; dir_p2 = LEFT;
+// Functie helper sa resetam jocul
+void reset_game() {
     memset(game_map, 0, sizeof(game_map));
-    game_reset_flag = true;
+    p1 = {100, 300, 1, 0, true, true};
+    p2 = {700, 300, -1, 0, true, true};
+    game_running = true;
+    status_message = "RUNNING";
+    std::cout << "[Game] Jocul a inceput!" << std::endl;
 }
 
-bool check_collision(int x, int y) {
-    if (x < 0 || x + PLAYER_SIZE > WIDTH || y < 0 || y + PLAYER_SIZE > HEIGHT) return true;
-    int check_x = x + PLAYER_SIZE / 2;
-    int check_y = y + PLAYER_SIZE / 2;
-    if (game_map[check_x][check_y]) return true;
-    return false;
-}
-
-void mark_trail(int x, int y) {
-    for (int i = x + 5; i < x + PLAYER_SIZE - 5; ++i) {
-        for (int j = y + 5; j < y + PLAYER_SIZE - 5; ++j) {
-            if (i >= 0 && i < WIDTH && j >= 0 && j < HEIGHT) {
-                game_map[i][j] = true;
-            }
-        }
-    }
-}
-
-// --- FIZICA JOCULUI (ENGINE) ---
-void game_logic_thread() {
-    std::cout << "[Server] Engine Pornit." << std::endl;
-    
+// --- THREAD 1: LOGICA JOCULUI (FIZICA) ---
+// Ruleaza independent de clienti, la fiecare 50ms
+void game_logic_loop() {
     while (true) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(30)); 
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-        game_mutex.lock();
+        std::lock_guard<std::mutex> lock(game_mutex);
+        if (!game_running) continue;
 
-        // Calcul pozitii viitoare
-        int next_p1_x = p1_x, next_p1_y = p1_y;
-        int next_p2_x = p2_x, next_p2_y = p2_y;
+        // 1. Actualizam pozitiile
+        p1.x += p1.dir_x * speed;
+        p1.y += p1.dir_y * speed;
+        p2.x += p2.dir_x * speed;
+        p2.y += p2.dir_y * speed;
 
-        if (dir_p1 == UP) next_p1_y -= SPEED;
-        if (dir_p1 == DOWN) next_p1_y += SPEED;
-        if (dir_p1 == LEFT) next_p1_x -= SPEED;
-        if (dir_p1 == RIGHT) next_p1_x += SPEED;
+        // 2. Verificam Coliziuni (Pereti)
+        if (p1.x < 0 || p1.x >= WIDTH || p1.y < 0 || p1.y >= HEIGHT) p1.alive = false;
+        if (p2.x < 0 || p2.x >= WIDTH || p2.y < 0 || p2.y >= HEIGHT) p2.alive = false;
 
-        if (dir_p2 == UP) next_p2_y -= SPEED;
-        if (dir_p2 == DOWN) next_p2_y += SPEED;
-        if (dir_p2 == LEFT) next_p2_x -= SPEED;
-        if (dir_p2 == RIGHT) next_p2_x += SPEED;
+        // 3. Verificam Coliziuni (Urme - Matrice)
+        // Verificam colturile patratului jucatorului ca sa fim siguri
+        if (p1.alive && game_map[p1.x][p1.y]) p1.alive = false;
+        if (p2.alive && game_map[p2.x][p2.y]) p2.alive = false;
 
-        bool p1_crashed = check_collision(next_p1_x, next_p1_y);
-        bool p2_crashed = check_collision(next_p2_x, next_p2_y);
-
-        if (abs(next_p1_x - next_p2_x) < PLAYER_SIZE && abs(next_p1_y - next_p2_y) < PLAYER_SIZE) {
-            p1_crashed = true; p2_crashed = true;
+        // 4. Marcam noua pozitie pe harta (lasam urma)
+        if (p1.alive) {
+            for(int i=0; i<PLAYER_SIZE; i++)
+                for(int j=0; j<PLAYER_SIZE; j++)
+                    if(p1.x+i < WIDTH && p1.y+j < HEIGHT) game_map[p1.x+i][p1.y+j] = true;
+        }
+        if (p2.alive) {
+            for(int i=0; i<PLAYER_SIZE; i++)
+                for(int j=0; j<PLAYER_SIZE; j++)
+                    if(p2.x+i < WIDTH && p2.y+j < HEIGHT) game_map[p2.x+i][p2.y+j] = true;
         }
 
-        if (p1_crashed || p2_crashed) {
-            // Logica Scori
-            if (p1_crashed && !p2_crashed) score_p2++;
-            else if (!p1_crashed && p2_crashed) score_p1++;
-            
-            // 1. Resetam pozitiile intern
-            reset_game_state();
-
-            // 2. Anuntam Scorul (Doar o singura data)
-            broadcast_score();
-            
-            // 3. Deblocam mutexul ca sa trimitem datele de reset si la clienti prin TCP
-            game_mutex.unlock();
-
-            // 4. PAUZA (COOLDOWN) - Aici era problema!
-            // Asteptam 2 secunde inainte sa inceapa runda urmatoare
-            std::this_thread::sleep_for(std::chrono::seconds(2));
-        } 
-        else {
-            mark_trail(p1_x, p1_y);
-            mark_trail(p2_x, p2_y);
-            p1_x = next_p1_x; p1_y = next_p1_y;
-            p2_x = next_p2_x; p2_y = next_p2_y;
-            game_mutex.unlock();
-        }
+        // 5. Verificam Castigatorul
+        if (!p1.alive && !p2.alive) { status_message = "DRAW"; game_running = false; }
+        else if (!p1.alive) { status_message = "P2_WINS"; game_running = false; }
+        else if (!p2.alive) { status_message = "P1_WINS"; game_running = false; }
     }
 }
 
-// --- UDP LISTENER ---
-void udp_listener_thread() {
-    int udp_sock;
-    struct sockaddr_in server_addr, client_addr;
-    if ((udp_sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) return;
-    int opt = 1;
-    setsockopt(udp_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(UDP_PORT);
-    if (bind(udp_sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) return;
+// --- THREAD 2+: COMUNICARE CU CLIENTII ---
+void handle_client(int client_socket, int player_id) {
+    // Setam timeout la recv ca sa nu blocheze thread-ul infinit
+    // Astfel putem trimite update-uri catre client chiar daca el nu apasa taste
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 100000; // 100ms timeout
+    setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
 
     char buffer[BUFFER_SIZE];
-    while(true) {
-        socklen_t len = sizeof(client_addr);
-        int n = recvfrom(udp_sock, buffer, BUFFER_SIZE, MSG_WAITALL, (struct sockaddr *)&client_addr, &len);
-        buffer[n] = '\0';
-        if (strstr(buffer, "SUBSCRIBE")) {
-            std::lock_guard<std::mutex> lock(game_mutex);
-            bool exists = false;
-            for(auto& c : udp_clients) {
-                if(c.sin_addr.s_addr == client_addr.sin_addr.s_addr && c.sin_port == client_addr.sin_port) exists = true;
-            }
-            if (!exists) udp_clients.push_back(client_addr);
-            
-            // Trimitem scorul curent imediat la conectare
-            std::string score_msg = "SCORE:" + std::to_string(score_p1) + " - " + std::to_string(score_p2);
-            sendto(udp_sock, score_msg.c_str(), score_msg.size(), 0, (struct sockaddr*)&client_addr, len);
-        }
+
+    // Activam jucatorul cand intra
+    {
+        std::lock_guard<std::mutex> lock(game_mutex);
+        if (player_id == 1) p1.active = true;
+        if (player_id == 2) p2.active = true;
+        // Daca sunt amandoi, dam start (reset)
+        if (p1.active && p2.active && !game_running) reset_game();
     }
-}
 
-// --- TCP CLIENT ---
-void handle_tcp_client(int client_socket, int player_id) {
-    char buffer[BUFFER_SIZE];
     while (true) {
         memset(buffer, 0, BUFFER_SIZE);
-        int bytes = recv(client_socket, buffer, BUFFER_SIZE, 0);
-        if (bytes <= 0) break;
-        char cmd = buffer[0];
-        game_mutex.lock();
-        if (player_id == 1) {
-            if (cmd == 'S' && dir_p1 != DOWN) dir_p1 = UP;
-            if (cmd == 'J' && dir_p1 != UP) dir_p1 = DOWN;
-            if (cmd == 'A' && dir_p1 != RIGHT) dir_p1 = LEFT;
-            if (cmd == 'D' && dir_p1 != LEFT) dir_p1 = RIGHT;
-        } else if (player_id == 2) {
-            if (cmd == 'S' && dir_p2 != DOWN) dir_p2 = UP;
-            if (cmd == 'J' && dir_p2 != UP) dir_p2 = DOWN;
-            if (cmd == 'A' && dir_p2 != RIGHT) dir_p2 = LEFT;
-            if (cmd == 'D' && dir_p2 != LEFT) dir_p2 = RIGHT;
+        int bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0);
+
+        // Daca recv returneaza eroare dar e doar timeout, continuam
+        if (bytes_received < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+            // Nu am primit input, dar nu e eroare, mergem mai departe sa trimitem starea
         }
-        std::string raspuns = std::to_string(p1_x) + "," + std::to_string(p1_y) + "," +
-                              std::to_string(p2_x) + "," + std::to_string(p2_y) + "," +
-                              (game_reset_flag ? "1" : "0");
-        if (game_reset_flag) game_reset_flag = false;
-        game_mutex.unlock();
-        send(client_socket, raspuns.c_str(), raspuns.size(), 0);
+        else if (bytes_received <= 0) {
+            std::cout << "[Server] Player " << player_id << " deconectat." << std::endl;
+            break;
+        }
+        else {
+            // Am primit INPUT (W,A,S,D)
+            char cmd = buffer[0];
+            std::lock_guard<std::mutex> lock(game_mutex);
+
+            if (game_running) {
+                if (player_id == 1) {
+                    if (cmd == 'W' && p1.dir_y == 0) { p1.dir_x = 0; p1.dir_y = -1; }
+                    if (cmd == 'S' && p1.dir_y == 0) { p1.dir_x = 0; p1.dir_y = 1; }
+                    if (cmd == 'A' && p1.dir_x == 0) { p1.dir_x = -1; p1.dir_y = 0; }
+                    if (cmd == 'D' && p1.dir_x == 0) { p1.dir_x = 1; p1.dir_y = 0; }
+                }
+                else if (player_id == 2) {
+                    if (cmd == 'W' && p2.dir_y == 0) { p2.dir_x = 0; p2.dir_y = -1; }
+                    if (cmd == 'S' && p2.dir_y == 0) { p2.dir_x = 0; p2.dir_y = 1; }
+                    if (cmd == 'A' && p2.dir_x == 0) { p2.dir_x = -1; p2.dir_y = 0; }
+                    if (cmd == 'D' && p2.dir_x == 0) { p2.dir_x = 1; p2.dir_y = 0; }
+                }
+            }
+            // Comanda de restart (R)
+            if (cmd == 'R' && !game_running) reset_game();
+        }
+
+        // --- TRIMITEM STAREA JOCULUI ---
+        // Format: "p1x,p1y,p2x,p2y,STATUS"
+        std::string msg;
+        {
+            std::lock_guard<std::mutex> lock(game_mutex);
+            msg = std::to_string(p1.x) + "," + std::to_string(p1.y) + "," +
+                  std::to_string(p2.x) + "," + std::to_string(p2.y) + "," +
+                  status_message;
+        }
+        send(client_socket, msg.c_str(), msg.size(), 0);
+    }
+
+    // Cleanup la iesire
+    {
+        std::lock_guard<std::mutex> lock(game_mutex);
+        if(player_id == 1) p1.active = false;
+        if(player_id == 2) p2.active = false;
+        game_running = false;
+        status_message = "WAITING";
     }
     close(client_socket);
 }
 
 int main() {
-    memset(game_map, 0, sizeof(game_map));
-    std::thread t_udp(udp_listener_thread); t_udp.detach();
-    std::thread t_physics(game_logic_thread); t_physics.detach();
-    int server_fd, new_socket;
-    struct sockaddr_in address; int addrlen = sizeof(address);
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) exit(EXIT_FAILURE);
-    int opt = 1; setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    address.sin_family = AF_INET; address.sin_addr.s_addr = INADDR_ANY; address.sin_port = htons(TCP_PORT);
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) exit(EXIT_FAILURE);
-    if (listen(server_fd, 3) < 0) exit(EXIT_FAILURE);
-    std::cout << "[Server] Gata de joc pe portul " << TCP_PORT << std::endl;
+    int server_fd;
+    struct sockaddr_in address;
+    int addrlen = sizeof(address);
+
+    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
+        perror("Socket failed");
+        exit(EXIT_FAILURE);
+    }
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(PORT);
+
+    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+        perror("Bind failed");
+        exit(EXIT_FAILURE);
+    }
+    if (listen(server_fd, 3) < 0) {
+        perror("Listen failed");
+        exit(EXIT_FAILURE);
+    }
+
+    std::cout << "[Server] Tron Server pornit. Astept jucatori..." << std::endl;
+
+    // Pornim thread-ul de fizica
+    std::thread physics_thread(game_logic_loop);
+    physics_thread.detach();
+
     int player_count = 0;
     while (true) {
-        if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) continue;
+        int new_socket;
+        if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
+            perror("Accept error");
+            continue;
+        }
         player_count++;
-        if (player_count > 2) { close(new_socket); player_count--; continue; }
-        std::thread t(handle_tcp_client, new_socket, player_count); t.detach();
+        // Simplificare: ID-ul e 1 sau 2. Resetam count daca depaseste.
+        int id = (player_count % 2 == 0) ? 2 : 1;
+
+        std::thread(handle_client, new_socket, id).detach();
     }
     return 0;
 }
